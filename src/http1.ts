@@ -32,22 +32,23 @@ export type BodySource = () => Promise<Uint8Array | null>;
  * either way the socket is closed after one exchange.
  */
 export function serializeRequest(
-  request: Request,
+  method: string,
   url: URL,
+  requestHeaders: Headers,
   body: Uint8Array | null,
 ): Uint8Array {
-  const headers = new Headers(request.headers);
+  const headers = new Headers(requestHeaders);
   const host = headers.get("host") ?? url.host;
   headers.delete("host");
   for (const name of FRAMING_HEADERS) headers.delete(name);
   if (!headers.has("accept")) headers.set("accept", "*/*");
 
   let head =
-    `${request.method} ${url.pathname}${url.search} HTTP/1.1\r\nhost: ${host}\r\n`;
+    `${method} ${url.pathname}${url.search} HTTP/1.1\r\nhost: ${host}\r\n`;
   for (const [name, value] of headers) head += `${name}: ${value}\r\n`;
   if (body !== null) {
     head += `content-length: ${body.length}\r\n`;
-  } else if (request.method === "POST" || request.method === "PUT") {
+  } else if (method === "POST" || method === "PUT") {
     head += "content-length: 0\r\n";
   }
   if (!headers.has("connection")) head += "connection: close\r\n";

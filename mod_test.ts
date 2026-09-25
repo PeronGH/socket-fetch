@@ -11,20 +11,37 @@ function bytes(text: string): Uint8Array {
   return Uint8Array.from(text, (char) => char.charCodeAt(0));
 }
 
-/** Serves a canned response over an in-memory socket, recording the request and socket state. */
+type Canned = string | ReadableStream<Uint8Array>;
+
+/**
+ * Serves one canned response per connection over in-memory sockets, recording requests and
+ * socket state. `closed` is true once every opened socket has been closed.
+ */
 function fakeServer(
-  response: string | ReadableStream<Uint8Array>,
+  responses: Canned | Canned[],
   { byteByByte = false } = {},
 ) {
-  const written: number[] = [];
+  const queue = Array.isArray(responses) ? [...responses] : [responses];
+  const written: number[][] = [];
+  const tls: boolean[] = [];
+  let open = 0;
   const state = {
-    closed: false,
+    get closed() {
+      return open === 0;
+    },
     address: undefined as SocketAddress | undefined,
     connections: 0,
   };
-  const connect: Connect = (address) => {
+  const connector = (secure: boolean): Connect => (address) => {
+    const response = queue.shift();
+    if (response === undefined) throw new Error("No response left");
     state.address = address;
     state.connections++;
+    tls.push(secure);
+    open++;
+    const chunks: number[] = [];
+    written.push(chunks);
+    let closed = false;
     const encoded = typeof response === "string" ? bytes(response) : undefined;
     return {
       readable: encoded === undefined
@@ -35,14 +52,22 @@ function fakeServer(
             : [encoded],
         ),
       writable: new WritableStream({
-        write: (chunk) => void written.push(...chunk),
+        write: (chunk) => void chunks.push(...chunk),
       }),
-      close: () => void (state.closed = true),
+      close: () => {
+        if (!closed) open--;
+        closed = true;
+      },
     };
   };
-  const fetch = createFetcher({ connect, connectTls: connect });
-  const request = () => String.fromCharCode(...written);
-  return { fetch, request, state };
+  const fetch = createFetcher({
+    connect: connector(false),
+    connectTls: connector(true),
+  });
+  const requests = () =>
+    written.map((chunks) => String.fromCharCode(...chunks));
+  const request = () => requests().at(-1)!;
+  return { fetch, request, requests, tls, state };
 }
 
 /** A readable that emits `head` and then stays open. */
@@ -306,7 +331,172 @@ Deno.test("rejects unsupported protocols", async () => {
   await assertRejects(
     () => server.fetch("ftp://example.com/"),
     TypeError,
-    "Unsupported protocol",
+    "fetch failed",
   );
   assertEquals(server.state.connections, 0);
+});
+
+const OK = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+
+function redirect(status: number, location: string): string {
+  return `HTTP/1.1 ${status} Redirect\r\nLocation: ${location}\r\nContent-Length: 5\r\n\r\nmoved`;
+}
+
+Deno.test("follows every redirect status to a relative Location", async (t) => {
+  for (const status of [301, 302, 303, 307, 308]) {
+    await t.step(String(status), async () => {
+      const server = fakeServer([redirect(status, "/next?q"), OK]);
+      const response = await server.fetch("http://example.com/start#frag");
+      assertEquals(await response.text(), "ok");
+      assertEquals(response.url, "http://example.com/next?q");
+      assertEquals(response.redirected, true);
+      assert(
+        server.requests()[1].startsWith(
+          "GET /next?q HTTP/1.1\r\nhost: example.com\r\n",
+        ),
+      );
+      assert(server.state.closed);
+    });
+  }
+});
+
+Deno.test("rewrites method and body per redirect status", async (t) => {
+  const cases: [number, string, string][] = [
+    [301, "POST", "GET"],
+    [302, "POST", "GET"],
+    [303, "POST", "GET"],
+    [303, "PUT", "GET"],
+    [303, "HEAD", "HEAD"],
+    [302, "PUT", "PUT"],
+    [307, "POST", "POST"],
+    [308, "PUT", "PUT"],
+  ];
+  for (const [status, method, expected] of cases) {
+    await t.step(`${status} ${method} -> ${expected}`, async () => {
+      const server = fakeServer([redirect(status, "/next"), OK]);
+      const hasBody = method !== "HEAD";
+      await server.fetch("http://example.com/", {
+        method,
+        headers: { "Content-Language": "en", "X-Other": "1" },
+        body: hasBody ? "data" : undefined,
+      });
+      const second = server.requests()[1];
+      assert(second.startsWith(`${expected} /next HTTP/1.1\r\n`));
+      assert(second.includes("\r\nx-other: 1\r\n"));
+      const rewritten = method !== expected;
+      assertEquals(second.includes("content-language: en"), !rewritten);
+      assertEquals(
+        second.includes("content-type: text/plain"),
+        hasBody && !rewritten,
+      );
+      assertEquals(second.endsWith("\r\n\r\ndata"), hasBody && !rewritten);
+    });
+  }
+});
+
+Deno.test("drops Authorization and Host once a redirect changes origin", async () => {
+  const server = fakeServer([
+    redirect(302, "/same"),
+    redirect(302, "https://other.test/"),
+    redirect(302, "http://example.com/back"),
+    OK,
+  ]);
+  const response = await server.fetch("http://example.com/", {
+    headers: { Authorization: "secret", Host: "custom" },
+  });
+  assertEquals(response.url, "http://example.com/back");
+  const [, same, other, back] = server.requests();
+  assert(same.includes("\r\nauthorization: secret\r\n"));
+  assert(same.includes("\r\nhost: custom\r\n"));
+  assert(!other.includes("authorization"));
+  assert(other.includes("\r\nhost: other.test\r\n"));
+  assert(!back.includes("authorization"));
+  assertEquals(server.tls, [false, false, true, false]);
+});
+
+Deno.test("returns a redirect without Location as-is", async () => {
+  const server = fakeServer("HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n");
+  const response = await server.fetch("http://example.com/");
+  assertEquals(response.status, 302);
+  assertEquals(response.redirected, false);
+  assertEquals(server.state.connections, 1);
+});
+
+Deno.test("returns the redirect response in manual mode", async () => {
+  const server = fakeServer(redirect(301, "/next"));
+  const response = await server.fetch("http://example.com/", {
+    redirect: "manual",
+  });
+  assertEquals(response.status, 301);
+  assertEquals(response.headers.get("location"), "/next");
+  assertEquals(response.redirected, false);
+  assertEquals(await response.text(), "moved");
+  assert(server.state.closed);
+});
+
+Deno.test("rejects any redirect status in error mode", async () => {
+  for (
+    const response of [
+      redirect(301, "/next"),
+      "HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n",
+    ]
+  ) {
+    const server = fakeServer(response);
+    await assertRejects(
+      () => server.fetch("http://example.com/", { redirect: "error" }),
+      TypeError,
+      "fetch failed",
+    );
+    assert(server.state.closed);
+  }
+});
+
+Deno.test("rejects invalid and non-HTTP(S) Locations", async () => {
+  for (const location of ["http://[::1", "ftp://example.com/", "data:,x"]) {
+    const server = fakeServer([redirect(302, location), OK]);
+    await assertRejects(
+      () => server.fetch("http://example.com/"),
+      TypeError,
+      "fetch failed",
+    );
+    assertEquals(server.state.connections, 1);
+    assert(server.state.closed);
+  }
+});
+
+Deno.test("follows at most 20 redirects", async () => {
+  const hops = (count: number) =>
+    Array.from({ length: count }, (_, i) => redirect(302, `/${i}`));
+
+  const ok = fakeServer([...hops(20), OK]);
+  assertEquals(await (await ok.fetch("http://example.com/")).text(), "ok");
+
+  const tooMany = fakeServer([...hops(21), OK]);
+  await assertRejects(
+    () => tooMany.fetch("http://example.com/"),
+    TypeError,
+    "fetch failed",
+  );
+  assertEquals(tooMany.state.connections, 21);
+  assert(tooMany.state.closed);
+});
+
+Deno.test("does not replay a stream body except on 303", async () => {
+  const streamed = () => ({
+    method: "POST",
+    body: ReadableStream.from([bytes("data")]),
+    duplex: "half",
+  } as RequestInit);
+
+  const replay = fakeServer([redirect(307, "/next"), OK]);
+  await assertRejects(
+    () => replay.fetch("http://example.com/", streamed()),
+    TypeError,
+    "fetch failed",
+  );
+  assertEquals(replay.state.connections, 1);
+
+  const seeOther = fakeServer([redirect(303, "/next"), OK]);
+  await seeOther.fetch("http://example.com/", streamed());
+  assert(seeOther.requests()[1].startsWith("GET /next HTTP/1.1\r\n"));
 });

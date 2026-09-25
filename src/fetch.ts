@@ -7,48 +7,133 @@ import {
   serializeRequest,
 } from "./http1.ts";
 
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_REDIRECTS = 20;
+/** Request-body-header names, removed when a redirect changes the method to GET. */
+const REQUEST_BODY_HEADERS = [
+  "content-encoding",
+  "content-language",
+  "content-location",
+  "content-type",
+];
+
+interface Exchange {
+  method: string;
+  url: URL;
+  headers: Headers;
+  body: Uint8Array | null;
+}
+
+/** Fetch with redirect handling per the Fetch Standard's HTTP fetch and HTTP-redirect fetch. */
 export async function send(
   options: FetcherOptions,
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> {
   const request = new Request(input, init);
-  request.signal.throwIfAborted();
-  const url = new URL(request.url);
+  const { signal } = request;
+  signal.throwIfAborted();
+  // Only stream bodies lack a source and so cannot be replayed on redirect. A stream body carried by
+  // an input Request is not detectable here and is replayed from the buffered copy.
+  const replayable = !(init?.body instanceof ReadableStream);
+  const exchange: Exchange = {
+    method: request.method,
+    url: new URL(request.url),
+    headers: new Headers(request.headers),
+    body: request.body === null
+      ? null
+      : new Uint8Array(await request.arrayBuffer()),
+  };
+
+  for (let redirects = 0;; redirects++) {
+    const response = await exchangeOnce(options, exchange, signal);
+    const { status } = response;
+    if (!REDIRECT_STATUSES.has(status) || request.redirect === "manual") {
+      return finish(response, exchange.url, redirects > 0);
+    }
+    const location = response.headers.get("location");
+    if (request.redirect === "follow" && location === null) {
+      return finish(response, exchange.url, redirects > 0);
+    }
+    await response.body?.cancel();
+    if (request.redirect === "error") {
+      throw networkError(`Redirect with redirect mode "error"`);
+    }
+
+    const next = URL.parse(location!, exchange.url);
+    if (next === null) throw networkError(`Invalid Location: ${location}`);
+    if (next.protocol !== "http:" && next.protocol !== "https:") {
+      throw networkError(`Redirect to unsupported protocol: ${next.protocol}`);
+    }
+    if (redirects === MAX_REDIRECTS) throw networkError("Too many redirects");
+    if (status !== 303 && exchange.body !== null && !replayable) {
+      throw networkError("Cannot replay a stream body on redirect");
+    }
+    if (
+      ((status === 301 || status === 302) && exchange.method === "POST") ||
+      (status === 303 && exchange.method !== "GET" &&
+        exchange.method !== "HEAD")
+    ) {
+      exchange.method = "GET";
+      exchange.body = null;
+      for (const name of REQUEST_BODY_HEADERS) exchange.headers.delete(name);
+    }
+    if (next.origin !== exchange.url.origin) {
+      exchange.headers.delete("authorization");
+      // A user-supplied Host names the original origin, so it must not follow a cross-origin redirect.
+      exchange.headers.delete("host");
+    }
+    exchange.url = next;
+  }
+}
+
+async function exchangeOnce(
+  options: FetcherOptions,
+  { method, url, headers, body }: Exchange,
+  signal: AbortSignal,
+): Promise<Response> {
   const connect = url.protocol === "http:"
     ? options.connect
     : url.protocol === "https:"
     ? options.connectTls
     : undefined;
   if (connect === undefined) {
-    throw new TypeError(`Unsupported protocol: ${url.protocol}`);
+    throw networkError(`Unsupported protocol: ${url.protocol}`);
   }
-  const body = request.body === null
-    ? null
-    : new Uint8Array(await request.arrayBuffer());
-  const message = serializeRequest(request, url, body);
+  const message = serializeRequest(method, url, headers, body);
 
-  const connection = new Connection(request.signal);
+  const connection = new Connection(signal);
   try {
     const socket = await connection.open(connect, toAddress(url));
     await connection.run(write(socket, message));
     const reader = new BufferedReader(socket.readable);
     const head = await connection.run(readResponseHead(reader));
-    const source = bodySource(reader, head, request.method);
+    const source = bodySource(reader, head, method);
     const stream = source === null ? null : connection.stream(source);
     if (stream === null) await connection.close();
-    const response = new Response(stream, {
+    return new Response(stream, {
       status: head.status,
       statusText: head.statusText,
       headers: head.headers,
     });
-    url.hash = "";
-    Object.defineProperty(response, "url", { value: url.href });
-    return response;
   } catch (error) {
     await connection.close();
     throw connection.toFetchError(error);
   }
+}
+
+function finish(response: Response, url: URL, redirected: boolean): Response {
+  const responseUrl = new URL(url);
+  responseUrl.hash = "";
+  Object.defineProperties(response, {
+    url: { value: responseUrl.href },
+    redirected: { value: redirected },
+  });
+  return response;
+}
+
+function networkError(message: string): TypeError {
+  return new TypeError("fetch failed", { cause: new Error(message) });
 }
 
 /** Owns one socket for one exchange: aborting, closing, and mapping errors to fetch semantics. */
