@@ -104,7 +104,6 @@ Errors and abort:
 ## Not yet implemented
 
 - Streaming request bodies with chunked coding.
-- Running the unit tests on workerd.
 
 Known differences from runtime `fetch`: `response.type` is `"default"` (as in workerd), and response headers are mutable.
 
