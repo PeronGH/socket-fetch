@@ -24,6 +24,13 @@ export interface ResponseHead {
   headers: Headers;
 }
 
+/** A buffered body is sent with Content-Length, a stream body with chunked coding. */
+export type RequestBody = Uint8Array | ReadableStream<Uint8Array> | null;
+
+const CRLF = new Uint8Array([0x0d, 0x0a]);
+/** Last chunk and empty trailer section of a chunked body. */
+const LAST_CHUNK = new Uint8Array([0x30, 0x0d, 0x0a, 0x0d, 0x0a]);
+
 /** Produces the next body chunk, or `null` once the body is complete. */
 export type BodySource = () => Promise<Uint8Array | null>;
 
@@ -35,7 +42,7 @@ export function serializeRequest(
   method: string,
   url: URL,
   requestHeaders: Headers,
-  body: Uint8Array | null,
+  body: RequestBody,
 ): Uint8Array {
   const headers = new Headers(requestHeaders);
   const host = headers.get("host") ?? url.host;
@@ -53,7 +60,9 @@ export function serializeRequest(
   let head =
     `${method} ${url.pathname}${url.search} HTTP/1.1\r\nhost: ${host}\r\n`;
   for (const [name, value] of headers) head += `${name}: ${value}\r\n`;
-  if (body !== null) {
+  if (body instanceof ReadableStream) {
+    head += "transfer-encoding: chunked\r\n";
+  } else if (body !== null) {
     head += `content-length: ${body.length}\r\n`;
   } else if (method === "POST" || method === "PUT") {
     head += "content-length: 0\r\n";
@@ -61,10 +70,33 @@ export function serializeRequest(
   if (!headers.has("connection")) head += "connection: close\r\n";
   head += "\r\n";
 
-  const bytes = new Uint8Array(head.length + (body?.length ?? 0));
+  const buffered = body instanceof Uint8Array ? body : null;
+  const bytes = new Uint8Array(head.length + (buffered?.length ?? 0));
   for (let i = 0; i < head.length; i++) bytes[i] = head.charCodeAt(i);
-  if (body !== null) bytes.set(body, head.length);
+  if (buffered !== null) bytes.set(buffered, head.length);
   return bytes;
+}
+
+/** Encodes a request body stream with chunked coding, including the last chunk. */
+export function chunkedEncoder(): TransformStream<Uint8Array, Uint8Array> {
+  return new TransformStream({
+    transform(chunk, controller) {
+      if (!(chunk instanceof Uint8Array)) {
+        throw new TypeError("Request body chunks must be Uint8Array");
+      }
+      // A zero-size chunk would terminate the body.
+      if (chunk.length === 0) return;
+      const size = `${chunk.length.toString(16)}\r\n`;
+      const bytes = new Uint8Array(size.length + chunk.length + 2);
+      for (let i = 0; i < size.length; i++) bytes[i] = size.charCodeAt(i);
+      bytes.set(chunk, size.length);
+      bytes.set(CRLF, size.length + chunk.length);
+      controller.enqueue(bytes);
+    },
+    flush(controller) {
+      controller.enqueue(LAST_CHUNK);
+    },
+  });
 }
 
 /** Reads the final response head, skipping interim 1xx responses. */

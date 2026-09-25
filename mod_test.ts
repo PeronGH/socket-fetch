@@ -574,3 +574,69 @@ Deno.test("keeps url and redirected on clones", async () => {
   assertEquals(await response.text(), "ok");
   assert(server.state.closed);
 });
+
+function streamedPost(body: ReadableStream<Uint8Array>): RequestInit {
+  return { method: "POST", body, duplex: "half" } as RequestInit;
+}
+
+Deno.test("streams a ReadableStream body with chunked coding", async () => {
+  const server = fakeServer("HTTP/1.1 204 No Content\r\n\r\n");
+  await server.fetch("http://example.com/", {
+    ...streamedPost(
+      ReadableStream.from([bytes("hel"), new Uint8Array(0), bytes("lo")]),
+    ),
+    headers: { "Content-Length": "99" },
+  });
+  const [head] = server.request().split("\r\n\r\n", 1);
+  assert(head.includes("\r\ntransfer-encoding: chunked"));
+  assert(!head.includes("content-length"));
+  assertEquals(
+    server.request().slice(head.length + 4),
+    "3\r\nhel\r\n2\r\nlo\r\n0\r\n\r\n",
+  );
+});
+
+Deno.test("rejects when the request body stream fails", async (t) => {
+  const bodies: Record<string, () => ReadableStream<Uint8Array>> = {
+    "stream error": () =>
+      new ReadableStream({
+        start: (controller) => {
+          controller.enqueue(bytes("a"));
+          controller.error(new Error("boom"));
+        },
+      }),
+    "non-Uint8Array chunk": () =>
+      ReadableStream.from(["text"]) as unknown as ReadableStream<Uint8Array>,
+  };
+  for (const [name, body] of Object.entries(bodies)) {
+    await t.step(name, async () => {
+      const server = fakeServer("HTTP/1.1 204 No Content\r\n\r\n");
+      await assertRejects(
+        () => server.fetch("http://example.com/", streamedPost(body())),
+        TypeError,
+        "fetch failed",
+      );
+      assert(server.state.closed);
+    });
+  }
+});
+
+Deno.test("aborts while uploading and cancels the body stream", async () => {
+  const controller = new AbortController();
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start: (stream) => stream.enqueue(bytes("a")),
+    cancel: () => void (cancelled = true),
+  });
+  const server = fakeServer(hangingAfter(""));
+  const pending = server.fetch("http://example.com/", {
+    ...streamedPost(body),
+    signal: controller.signal,
+  });
+  await new Promise((resolve) => setTimeout(resolve));
+  controller.abort(new Error("stop"));
+  await assertRejects(() => pending, Error, "stop");
+  assert(server.state.closed);
+  await new Promise((resolve) => setTimeout(resolve));
+  assert(cancelled);
+});

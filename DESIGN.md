@@ -72,11 +72,12 @@ Runtime differences and constraints (verified on Deno 2.9.7 and workerd 2026-08-
 
 Request:
 
-- `new Request(input, init)` normalizes arguments; the body is buffered and sent with `Content-Length` (`0` for bodiless `POST`/`PUT`).
+- `new Request(input, init)` normalizes arguments.
+- A `ReadableStream` `init.body` is sent with chunked coding (as all three runtimes do), piped with the abort signal so an abort cancels it. The request is fully sent before the response is read (`duplex: "half"`). Other bodies, including a stream carried by an input `Request`, are buffered and sent with `Content-Length` (`0` for bodiless `POST`/`PUT`).
 - Request target is path plus query. `host` is sent first; a user-supplied `Host` is kept.
 - `Accept: */*` is added if absent. No default `User-Agent` (workerd sends none).
 - `Accept-Encoding: gzip, deflate` is added if absent (as Node does; Deno sends `gzip,br`, workerd none), or `identity` when a `Range` header is present.
-- `Connection: close` is added unless the user set `Connection`. User `Content-Length` and `Transfer-Encoding` are replaced, since framing is ours.
+- `Connection: close` is added unless the user set `Connection`. User `Content-Length` and `Transfer-Encoding` are replaced, since framing is ours (Deno and workerd also ignore a user `Content-Length` on stream bodies).
 
 Response:
 
@@ -101,11 +102,9 @@ Errors and abort:
 - Network and protocol errors reject with `TypeError("fetch failed")`, with the underlying error as `cause`. A body stream errors the same way.
 - `init.signal` rejects with its reason before connecting, while connecting, while waiting for the head, and while reading the body, and closes the socket.
 
-## Not yet implemented
+## Known differences
 
-- Streaming request bodies with chunked coding.
-
-Known differences from runtime `fetch`: `response.type` is `"default"` (as in workerd), and response headers are mutable.
+From runtime `fetch`: `response.type` is `"default"` (as in workerd), and response headers are mutable.
 
 ## Testing
 

@@ -3,8 +3,10 @@ import { BufferedReader } from "./buffered_reader.ts";
 import {
   type BodySource,
   bodySource,
+  chunkedEncoder,
   decodeContent,
   readResponseHead,
+  type RequestBody,
   serializeRequest,
 } from "./http1.ts";
 
@@ -22,7 +24,7 @@ interface Exchange {
   method: string;
   url: URL;
   headers: Headers;
-  body: Uint8Array | null;
+  body: RequestBody;
 }
 
 /** Fetch with redirect handling per the Fetch Standard's HTTP fetch and HTTP-redirect fetch. */
@@ -34,15 +36,18 @@ export async function send(
   const request = new Request(input, init);
   const { signal } = request;
   signal.throwIfAborted();
-  // Only stream bodies lack a source and so cannot be replayed on redirect. A stream body carried by
-  // an input Request is not detectable here and is replayed from the buffered copy.
-  const replayable = !(init?.body instanceof ReadableStream);
+  // A stream init.body is sent with chunked coding and, lacking a source, cannot be replayed on
+  // redirect. Other bodies, including a stream carried by an input Request (which is not
+  // detectable here), are buffered, sent with Content-Length, and replayable.
+  const streaming = init?.body instanceof ReadableStream;
   const exchange: Exchange = {
     method: request.method,
     url: new URL(request.url),
     headers: new Headers(request.headers),
     body: request.body === null
       ? null
+      : streaming
+      ? request.body
       : new Uint8Array(await request.arrayBuffer()),
   };
 
@@ -67,7 +72,7 @@ export async function send(
       throw networkError(`Redirect to unsupported protocol: ${next.protocol}`);
     }
     if (redirects === MAX_REDIRECTS) throw networkError("Too many redirects");
-    if (status !== 303 && exchange.body !== null && !replayable) {
+    if (status !== 303 && exchange.body !== null && streaming) {
       throw networkError("Cannot replay a stream body on redirect");
     }
     if (
@@ -106,7 +111,7 @@ async function exchangeOnce(
   const connection = new Connection(signal);
   try {
     const socket = await connection.open(connect, toAddress(url));
-    await connection.run(write(socket, message));
+    await connection.run(write(socket, message, body, signal));
     const reader = new BufferedReader(socket.readable);
     const head = await connection.run(readResponseHead(reader));
     const source = bodySource(reader, head, method);
@@ -226,12 +231,24 @@ class Connection {
   }
 }
 
-async function write(socket: Socket, bytes: Uint8Array): Promise<void> {
+async function write(
+  socket: Socket,
+  message: Uint8Array,
+  body: RequestBody,
+  signal: AbortSignal,
+): Promise<void> {
   const writer = socket.writable.getWriter();
   try {
-    await writer.write(bytes);
+    await writer.write(message);
   } finally {
     writer.releaseLock();
+  }
+  if (body instanceof ReadableStream) {
+    // The signal makes an abort cancel the body stream instead of leaving it locked.
+    await body.pipeThrough(chunkedEncoder()).pipeTo(socket.writable, {
+      preventClose: true,
+      signal,
+    });
   }
 }
 
