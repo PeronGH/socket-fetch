@@ -25,6 +25,8 @@
  * @module
  */
 
+import { send } from "./src/fetch.ts";
+
 /** Remote endpoint derived from the request URL. */
 export interface SocketAddress {
   hostname: string;
@@ -55,6 +57,5 @@ export interface FetcherOptions {
 
 /** Creates a `fetch`-compatible function that sends requests over the given sockets. */
 export function createFetcher(options: FetcherOptions): typeof fetch {
-  void options;
-  return () => Promise.reject(new Error("Not implemented"));
+  return (input, init) => send(options, input, init);
 }

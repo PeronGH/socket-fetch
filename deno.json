@@ -5,5 +5,18 @@
   "license": "MIT",
   "fmt": {
     "proseWrap": "preserve"
+  },
+  "imports": {
+    "@std/assert": "jsr:@std/assert@^1.0.19"
+  },
+  "tasks": {
+    "test": "deno test --allow-net=example.com",
+    "test:workerd": "deno bundle --platform browser --external cloudflare:sockets -o test/workerd/dist/worker.js test/workerd/worker.ts && workerd test test/workerd/config.capnp"
+  },
+  "publish": {
+    "exclude": [
+      "**/*_test.ts",
+      "test/"
+    ]
   }
 }
