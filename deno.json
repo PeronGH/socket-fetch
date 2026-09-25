@@ -2,5 +2,8 @@
   "name": "@pixel/socket-fetch",
   "version": "0.1.0",
   "exports": "./mod.ts",
-  "license": "MIT"
+  "license": "MIT",
+  "fmt": {
+    "proseWrap": "preserve"
+  }
 }
