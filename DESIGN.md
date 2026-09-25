@@ -62,7 +62,7 @@ Runtime differences and constraints (verified on Deno 2.9.7 and workerd 2026-08-
 - workerd's `DecompressionStream` supports only `gzip`, `deflate`, `deflate-raw`. Only advertise and decode `gzip` and `deflate`.
 - `Response` only accepts status 200–599 (Deno also allows 101). Consume 1xx interim responses; treat other out-of-range statuses as a network error.
 - Neither runtime's `Headers` enforces forbidden request headers, so header policy is ours to define.
-- `Response.url` and `Response.redirected` cannot be set via the constructor; define them on the instance with `Object.defineProperty`. `clone()` drops them, so it must be wrapped to carry them over.
+- `Response.url` and `Response.redirected` cannot be set via the constructor; define them on the instance with `Object.defineProperty`. The native `clone()` drops them, while native `fetch` responses keep them on clones in all three runtimes, so `clone()` is wrapped.
 - `TextDecoder("latin1")` is windows-1252 per the Encoding Standard (`0x80` decodes to `€`). Header bytes need isomorphic decoding (byte to code unit), and isomorphic encoding on the way out.
 - Deno's `Headers` returns `""` instead of throwing for a value with surrounding whitespace and an interior CR or LF (reported upstream). The parser rejects CR and NUL in the response head itself.
 - Deno closes a socket once its readable side ends, so a later `close()` throws. Socket cleanup ignores `close()` errors.
@@ -85,7 +85,7 @@ Response:
 - Body length per RFC 9112 §6.3: none for `HEAD`, 204, and 304; chunked (extensions ignored, trailers discarded); `Content-Length` (identical duplicates accepted); otherwise until close. `Transfer-Encoding` with `Content-Length`, any coding other than a single `chunked`, and `Transfer-Encoding` in HTTP/1.0 are errors.
 - The body is a pull-based stream. The socket closes when the body completes, errors, or is cancelled, or immediately when there is no body.
 - `Content-Encoding` `gzip`, `x-gzip`, and `deflate` are decoded with `DecompressionStream`, last applied first, regardless of what was requested (as all three runtimes do). A body with any other coding is passed through unchanged. Headers are kept as received.
-- `url` (without fragment) and `redirected` are defined on the `Response` instance.
+- `url` (without fragment) and `redirected` are defined on the `Response` instance, and `clone()` is overridden to carry them over.
 
 Redirects (Fetch HTTP-redirect fetch):
 
@@ -104,7 +104,6 @@ Errors and abort:
 ## Not yet implemented
 
 - Streaming request bodies with chunked coding.
-- `clone()` preserving `url` and `redirected`.
 - Running the unit tests on workerd.
 
 Known differences from runtime `fetch`: `response.type` is `"default"` (as in workerd), and response headers are mutable.

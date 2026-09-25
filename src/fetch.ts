@@ -129,11 +129,21 @@ async function exchangeOnce(
 function finish(response: Response, url: URL, redirected: boolean): Response {
   const responseUrl = new URL(url);
   responseUrl.hash = "";
-  Object.defineProperties(response, {
-    url: { value: responseUrl.href },
+  return withUrl(response, responseUrl.href, redirected);
+}
+
+/** Defines `url` and `redirected`, which the Response constructor cannot set, and keeps them on clones. */
+function withUrl(
+  response: Response,
+  url: string,
+  redirected: boolean,
+): Response {
+  const clone = response.clone.bind(response);
+  return Object.defineProperties(response, {
+    url: { value: url },
     redirected: { value: redirected },
+    clone: { value: () => withUrl(clone(), url, redirected) },
   });
-  return response;
 }
 
 function networkError(message: string): TypeError {

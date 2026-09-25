@@ -561,3 +561,16 @@ Deno.test("errors the body and closes the socket on corrupt content", async () =
   await assertRejects(() => response.text(), TypeError);
   assert(server.state.closed);
 });
+
+Deno.test("keeps url and redirected on clones", async () => {
+  const server = fakeServer([redirect(302, "/next"), OK]);
+  const response = await server.fetch("http://example.com/");
+  const clone = response.clone().clone();
+  assertEquals([clone.url, clone.redirected], [
+    "http://example.com/next",
+    true,
+  ]);
+  assertEquals(await clone.text(), "ok");
+  assertEquals(await response.text(), "ok");
+  assert(server.state.closed);
+});
