@@ -14,8 +14,8 @@ const STATUS_LINE = /^HTTP\/1\.(\d) (\d{3})(?: (.*))?$/;
 const CONTENT_LENGTH = /^\d+$/;
 const HEX = /^[0-9a-fA-F]+$/;
 
-/** Headers the fetcher controls because it owns message framing and the connection. */
-const MANAGED_HEADERS = ["connection", "content-length", "transfer-encoding"];
+/** Headers the fetcher controls because it owns message framing. */
+const FRAMING_HEADERS = ["content-length", "transfer-encoding"];
 
 export interface ResponseHead {
   minorVersion: number;
@@ -27,7 +27,10 @@ export interface ResponseHead {
 /** Produces the next body chunk, or `null` once the body is complete. */
 export type BodySource = () => Promise<Uint8Array | null>;
 
-/** Serializes a request head and body for a `Connection: close` exchange. */
+/**
+ * Serializes a request head and body. `Connection: close` is added unless the user set `Connection`;
+ * either way the socket is closed after one exchange.
+ */
 export function serializeRequest(
   request: Request,
   url: URL,
@@ -36,7 +39,7 @@ export function serializeRequest(
   const headers = new Headers(request.headers);
   const host = headers.get("host") ?? url.host;
   headers.delete("host");
-  for (const name of MANAGED_HEADERS) headers.delete(name);
+  for (const name of FRAMING_HEADERS) headers.delete(name);
   if (!headers.has("accept")) headers.set("accept", "*/*");
 
   let head =
@@ -47,7 +50,8 @@ export function serializeRequest(
   } else if (request.method === "POST" || request.method === "PUT") {
     head += "content-length: 0\r\n";
   }
-  head += "connection: close\r\n\r\n";
+  if (!headers.has("connection")) head += "connection: close\r\n";
+  head += "\r\n";
 
   const bytes = new Uint8Array(head.length + (body?.length ?? 0));
   for (let i = 0; i < head.length; i++) bytes[i] = head.charCodeAt(i);

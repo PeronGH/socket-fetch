@@ -52,7 +52,7 @@ function hangingAfter(head: string): ReadableStream<Uint8Array> {
   });
 }
 
-Deno.test("serializes the request with managed headers", async () => {
+Deno.test("serializes the request with framing headers", async () => {
   const server = fakeServer("HTTP/1.1 204 No Content\r\n\r\n");
   await server.fetch("http://example.com:8080/a/b?x=1#frag", {
     method: "POST",
@@ -68,10 +68,10 @@ Deno.test("serializes the request with managed headers", async () => {
     "POST /a/b?x=1 HTTP/1.1\r\n" +
       "host: example.com:8080\r\n" +
       "accept: */*\r\n" +
+      "connection: keep-alive\r\n" +
       "content-type: text/plain;charset=UTF-8\r\n" +
       "x-custom: é\r\n" +
       "content-length: 5\r\n" +
-      "connection: close\r\n" +
       "\r\n" +
       "hello",
   );
