@@ -3,6 +3,7 @@ import {
   assertEquals,
   assertRejects,
   assertStrictEquals,
+  assertThrows,
 } from "@std/assert";
 import { type Connect, createFetcher, type SocketAddress } from "./mod.ts";
 
@@ -639,4 +640,22 @@ Deno.test("aborts while uploading and cancels the body stream", async () => {
   assert(server.state.closed);
   await new Promise((resolve) => setTimeout(resolve));
   assert(cancelled);
+});
+
+Deno.test("exposes immutable response headers, also on clones", async () => {
+  const server = fakeServer(
+    "HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nX-A: 1\r\nContent-Length: 2\r\n\r\nok",
+  );
+  const response = await server.fetch("http://example.com/");
+  for (const headers of [response.headers, response.clone().headers]) {
+    assertEquals(headers.get("x-a"), "1");
+    assertEquals(headers.getSetCookie(), ["a=1", "b=2"]);
+    assert(headers instanceof Headers);
+    assertThrows(() => headers.set("x-a", "2"), TypeError);
+    assertThrows(() => headers.append("x-b", "2"), TypeError);
+    assertThrows(() => headers.delete("x-a"), TypeError);
+  }
+  const copy = new Response(response.body, response);
+  copy.headers.set("x-a", "2");
+  assertEquals(await copy.text(), "ok");
 });

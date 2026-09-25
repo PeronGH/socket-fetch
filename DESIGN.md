@@ -86,7 +86,7 @@ Response:
 - Body length per RFC 9112 §6.3: none for `HEAD`, 204, and 304; chunked (extensions ignored, trailers discarded); `Content-Length` (identical duplicates accepted); otherwise until close. `Transfer-Encoding` with `Content-Length`, any coding other than a single `chunked`, and `Transfer-Encoding` in HTTP/1.0 are errors.
 - The body is a pull-based stream. The socket closes when the body completes, errors, or is cancelled, or immediately when there is no body.
 - `Content-Encoding` `gzip`, `x-gzip`, and `deflate` are decoded with `DecompressionStream`, last applied first, regardless of what was requested (as all three runtimes do). A body with any other coding is passed through unchanged. Headers are kept as received.
-- `url` (without fragment) and `redirected` are defined on the `Response` instance, and `clone()` is overridden to carry them over.
+- `url` (without fragment), `redirected`, and `headers` are defined on the `Response` instance, and `clone()` is overridden to carry them over. `headers` is a `Headers` subclass whose `set`, `append`, and `delete` throw `TypeError`, matching the immutable headers of fetched responses in all three runtimes.
 
 Redirects (Fetch HTTP-redirect fetch):
 
@@ -104,7 +104,7 @@ Errors and abort:
 
 ## Known differences
 
-From runtime `fetch`: `response.type` is `"default"` (as in workerd), and response headers are mutable.
+From runtime `fetch`: `response.type` is `"default"`, as in workerd; Deno reports `"basic"` and Node `"basic"` or `"cors"`, so there is no common value. `response.headers` is an instance of a `Headers` subclass.
 
 ## Testing
 

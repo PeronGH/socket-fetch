@@ -134,11 +134,14 @@ async function exchangeOnce(
 function finish(response: Response, url: URL, redirected: boolean): Response {
   const responseUrl = new URL(url);
   responseUrl.hash = "";
-  return withUrl(response, responseUrl.href, redirected);
+  return withFetchFields(response, responseUrl.href, redirected);
 }
 
-/** Defines `url` and `redirected`, which the Response constructor cannot set, and keeps them on clones. */
-function withUrl(
+/**
+ * Gives a constructed Response what a fetched one has but the constructor cannot set: `url`,
+ * `redirected`, and immutable headers. `clone()` is wrapped so clones keep them.
+ */
+function withFetchFields(
   response: Response,
   url: string,
   redirected: boolean,
@@ -147,8 +150,22 @@ function withUrl(
   return Object.defineProperties(response, {
     url: { value: url },
     redirected: { value: redirected },
-    clone: { value: () => withUrl(clone(), url, redirected) },
+    headers: { value: new ImmutableHeaders(response.headers) },
+    clone: { value: () => withFetchFields(clone(), url, redirected) },
   });
+}
+
+/** Mirrors the "immutable" guard of fetched response headers. */
+class ImmutableHeaders extends Headers {
+  override append(): never {
+    throw new TypeError("Headers are immutable");
+  }
+  override set(): never {
+    throw new TypeError("Headers are immutable");
+  }
+  override delete(): never {
+    throw new TypeError("Headers are immutable");
+  }
 }
 
 function networkError(message: string): TypeError {
