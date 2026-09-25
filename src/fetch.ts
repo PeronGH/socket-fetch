@@ -3,6 +3,7 @@ import { BufferedReader } from "./buffered_reader.ts";
 import {
   type BodySource,
   bodySource,
+  decodeContent,
   readResponseHead,
   serializeRequest,
 } from "./http1.ts";
@@ -109,7 +110,10 @@ async function exchangeOnce(
     const reader = new BufferedReader(socket.readable);
     const head = await connection.run(readResponseHead(reader));
     const source = bodySource(reader, head, method);
-    const stream = source === null ? null : connection.stream(source);
+    const stream = source === null ? null : decodeContent(
+      connection.stream(source),
+      head.headers.get("content-encoding"),
+    );
     if (stream === null) await connection.close();
     return new Response(stream, {
       status: head.status,

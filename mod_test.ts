@@ -93,6 +93,7 @@ Deno.test("serializes the request with framing headers", async () => {
     "POST /a/b?x=1 HTTP/1.1\r\n" +
       "host: example.com:8080\r\n" +
       "accept: */*\r\n" +
+      "accept-encoding: gzip, deflate\r\n" +
       "connection: keep-alive\r\n" +
       "content-type: text/plain;charset=UTF-8\r\n" +
       "x-custom: é\r\n" +
@@ -103,14 +104,18 @@ Deno.test("serializes the request with framing headers", async () => {
   assertEquals(server.state.address, { hostname: "example.com", port: 8080 });
 });
 
-Deno.test("keeps a user-supplied Host and Accept", async () => {
+Deno.test("keeps a user-supplied Host, Accept, and Accept-Encoding", async () => {
   const server = fakeServer("HTTP/1.1 204 No Content\r\n\r\n");
   await server.fetch("http://[::1]/", {
-    headers: { Host: "other.test", Accept: "text/html" },
+    headers: {
+      Host: "other.test",
+      Accept: "text/html",
+      "Accept-Encoding": "br",
+    },
   });
   assertEquals(
     server.request(),
-    "GET / HTTP/1.1\r\nhost: other.test\r\naccept: text/html\r\nconnection: close\r\n\r\n",
+    "GET / HTTP/1.1\r\nhost: other.test\r\naccept: text/html\r\naccept-encoding: br\r\nconnection: close\r\n\r\n",
   );
   assertEquals(server.state.address, { hostname: "::1", port: 80 });
 });
@@ -499,4 +504,60 @@ Deno.test("does not replay a stream body except on 303", async () => {
   const seeOther = fakeServer([redirect(303, "/next"), OK]);
   await seeOther.fetch("http://example.com/", streamed());
   assert(seeOther.requests()[1].startsWith("GET /next HTTP/1.1\r\n"));
+});
+
+async function compress(text: string, formats: CompressionFormat[]) {
+  let stream = ReadableStream.from([new TextEncoder().encode(text)]);
+  for (const format of formats) {
+    stream = stream.pipeThrough(new CompressionStream(format));
+  }
+  return String.fromCharCode(
+    ...await Array.fromAsync(stream, (c) => [...c]).then((c) => c.flat()),
+  );
+}
+
+function encoded(contentEncoding: string, body: string): string {
+  return `HTTP/1.1 200 OK\r\nContent-Encoding: ${contentEncoding}\r\nTransfer-Encoding: chunked\r\n\r\n` +
+    `${body.length.toString(16)}\r\n${body}\r\n0\r\n\r\n`;
+}
+
+Deno.test("asks for identity encoding on range requests", async () => {
+  const server = fakeServer("HTTP/1.1 204 No Content\r\n\r\n");
+  await server.fetch("http://example.com/", {
+    headers: { Range: "bytes=0-1" },
+  });
+  assert(server.request().includes("\r\naccept-encoding: identity\r\n"));
+});
+
+Deno.test("decodes content codings, last applied first", async (t) => {
+  const cases: [string, CompressionFormat[]][] = [
+    ["gzip", ["gzip"]],
+    ["X-Gzip", ["gzip"]],
+    ["deflate", ["deflate"]],
+    ["deflate, gzip", ["deflate", "gzip"]],
+  ];
+  for (const [contentEncoding, formats] of cases) {
+    await t.step(contentEncoding, async () => {
+      const server = fakeServer(
+        encoded(contentEncoding, await compress("hello", formats)),
+        { byteByByte: true },
+      );
+      const response = await server.fetch("http://example.com/");
+      assertEquals(await response.text(), "hello");
+      assertEquals(response.headers.get("content-encoding"), contentEncoding);
+      assert(server.state.closed);
+    });
+  }
+});
+
+Deno.test("passes through codings it cannot decode", async () => {
+  const server = fakeServer(encoded("gzip, br", "raw"));
+  assertEquals(await (await server.fetch("http://example.com/")).text(), "raw");
+});
+
+Deno.test("errors the body and closes the socket on corrupt content", async () => {
+  const server = fakeServer(encoded("gzip", "not gzip"));
+  const response = await server.fetch("http://example.com/");
+  await assertRejects(() => response.text(), TypeError);
+  assert(server.state.closed);
 });

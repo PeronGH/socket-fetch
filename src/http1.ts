@@ -42,6 +42,13 @@ export function serializeRequest(
   headers.delete("host");
   for (const name of FRAMING_HEADERS) headers.delete(name);
   if (!headers.has("accept")) headers.set("accept", "*/*");
+  if (!headers.has("accept-encoding")) {
+    // Fetch Standard: partial content must not be content-coded, since it cannot be decoded alone.
+    headers.set(
+      "accept-encoding",
+      headers.has("range") ? "identity" : "gzip, deflate",
+    );
+  }
 
   let head =
     `${method} ${url.pathname}${url.search} HTTP/1.1\r\nhost: ${host}\r\n`;
@@ -248,6 +255,37 @@ async function skipTrailers(reader: BufferedReader): Promise<void> {
     if (line.length === 0) return;
     budget -= line.length + 2;
   }
+}
+
+const DECOMPRESSION_FORMATS = new Map<string, CompressionFormat>([
+  ["gzip", "gzip"],
+  ["x-gzip", "gzip"],
+  ["deflate", "deflate"],
+]);
+
+/**
+ * Removes the content codings listed in `Content-Encoding`, last applied first. Bodies with a
+ * coding that cannot be decoded (such as `br`, unsupported by workerd) are returned unchanged.
+ */
+export function decodeContent(
+  body: ReadableStream<Uint8Array>,
+  contentEncoding: string | null,
+): ReadableStream<Uint8Array> {
+  if (contentEncoding === null) return body;
+  const formats = parseList(contentEncoding).map((coding) =>
+    DECOMPRESSION_FORMATS.get(coding.toLowerCase())
+  );
+  if (formats.some((format) => format === undefined)) return body;
+  let decoded = body;
+  for (const format of (formats as CompressionFormat[]).reverse()) {
+    // Socket chunks are typed ArrayBufferLike-backed, which DecompressionStream's types exclude.
+    const decompression = new DecompressionStream(format) as TransformStream<
+      Uint8Array,
+      Uint8Array
+    >;
+    decoded = decoded.pipeThrough(decompression);
+  }
+  return decoded;
 }
 
 /** Splits a comma-separated field value, ignoring empty elements (RFC 9110 §5.6.1). */

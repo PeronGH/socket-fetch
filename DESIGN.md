@@ -75,6 +75,7 @@ Request:
 - `new Request(input, init)` normalizes arguments; the body is buffered and sent with `Content-Length` (`0` for bodiless `POST`/`PUT`).
 - Request target is path plus query. `host` is sent first; a user-supplied `Host` is kept.
 - `Accept: */*` is added if absent. No default `User-Agent` (workerd sends none).
+- `Accept-Encoding: gzip, deflate` is added if absent (as Node does; Deno sends `gzip,br`, workerd none), or `identity` when a `Range` header is present.
 - `Connection: close` is added unless the user set `Connection`. User `Content-Length` and `Transfer-Encoding` are replaced, since framing is ours.
 
 Response:
@@ -83,6 +84,7 @@ Response:
 - Interim 1xx responses are skipped; 101 and statuses outside 100–599 are errors.
 - Body length per RFC 9112 §6.3: none for `HEAD`, 204, and 304; chunked (extensions ignored, trailers discarded); `Content-Length` (identical duplicates accepted); otherwise until close. `Transfer-Encoding` with `Content-Length`, any coding other than a single `chunked`, and `Transfer-Encoding` in HTTP/1.0 are errors.
 - The body is a pull-based stream. The socket closes when the body completes, errors, or is cancelled, or immediately when there is no body.
+- `Content-Encoding` `gzip`, `x-gzip`, and `deflate` are decoded with `DecompressionStream`, last applied first, regardless of what was requested (as all three runtimes do). A body with any other coding is passed through unchanged. Headers are kept as received.
 - `url` (without fragment) and `redirected` are defined on the `Response` instance.
 
 Redirects (Fetch HTTP-redirect fetch):
@@ -101,7 +103,6 @@ Errors and abort:
 
 ## Not yet implemented
 
-- Decompression (`gzip`, `deflate`).
 - Streaming request bodies with chunked coding.
 - `clone()` preserving `url` and `redirected`.
 - Running the unit tests on workerd.
