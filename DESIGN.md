@@ -4,6 +4,11 @@
 
 A `fetch`-compatible HTTP/1.1 client built on a user-supplied socket API. Published on JSR, written for Deno, and must run on Cloudflare Workers (workerd).
 
+## Principles
+
+- Compatibility target is the behavior Deno, workerd, and Node's `fetch` share. The specs below are the reference for details, but compliance is a trade-off: follow them where it stays simple, and settle on the common runtime behavior where full compliance would add real complexity.
+- Skip spec steps whose effect cannot be observed through this library's API.
+
 ## Interface
 
 `createFetcher({ connect, connectTls })` returns `typeof fetch`.
@@ -16,7 +21,7 @@ A `fetch`-compatible HTTP/1.1 client built on a user-supplied socket API. Publis
 ## Scope
 
 - HTTP/1.1 only. `connectTls` must not negotiate another protocol via ALPN.
-- No connection pooling: one connection per request, `Connection: close`. Workers sockets cannot be shared across requests.
+- No connection pooling: one connection per request, closed after the response. Workers sockets cannot be shared across requests.
 - No `Upgrade` support.
 - Browser-only fetch concerns (CORS, CSP, cookie jar, HTTP cache) are out of scope.
 
@@ -59,10 +64,52 @@ Runtime differences and constraints (verified on Deno 2.9.7 and workerd 2026-08-
 - Neither runtime's `Headers` enforces forbidden request headers, so header policy is ours to define.
 - `Response.url` and `Response.redirected` cannot be set via the constructor; define them on the instance with `Object.defineProperty`. `clone()` drops them, so it must be wrapped to carry them over.
 - `TextDecoder("latin1")` is windows-1252 per the Encoding Standard (`0x80` decodes to `€`). Header bytes need isomorphic decoding (byte to code unit), and isomorphic encoding on the way out.
+- Deno's `Headers` returns `""` instead of throwing for a value with surrounding whitespace and an interior CR or LF (reported upstream). The parser rejects CR and NUL in the response head itself.
+- Deno closes a socket once its readable side ends, so a later `close()` throws. Socket cleanup ignores `close()` errors.
+- For `redirect: "manual"`, Deno, workerd, and Node return the actual 3xx response rather than the spec's opaque-redirect response.
 
-## Implemented here
+## Behavior
 
-- Request serialization: request line, headers, `Content-Length` or chunked body.
-- Response head parsing on bytes, with size limits.
-- Body framing per RFC 9112 §6.3, chunked decoding as a `TransformStream`.
-- Fetch layer: redirects, abort, transport selection, socket cleanup.
+Request:
+
+- `new Request(input, init)` normalizes arguments; the body is buffered and sent with `Content-Length` (`0` for bodiless `POST`/`PUT`).
+- Request target is path plus query. `host` is sent first; a user-supplied `Host` is kept.
+- `Accept: */*` is added if absent. No default `User-Agent` (workerd sends none).
+- `Connection: close` is added unless the user set `Connection`. User `Content-Length` and `Transfer-Encoding` are replaced, since framing is ours.
+
+Response:
+
+- Status line and fields are parsed as bytes with a 64 KiB head limit. LF-only line endings are accepted, obs-fold is replaced with SP, whitespace before the first field and CR/NUL in fields are rejected.
+- Interim 1xx responses are skipped; 101 and statuses outside 100–599 are errors.
+- Body length per RFC 9112 §6.3: none for `HEAD`, 204, and 304; chunked (extensions ignored, trailers discarded); `Content-Length` (identical duplicates accepted); otherwise until close. `Transfer-Encoding` with `Content-Length`, any coding other than a single `chunked`, and `Transfer-Encoding` in HTTP/1.0 are errors.
+- The body is a pull-based stream. The socket closes when the body completes, errors, or is cancelled, or immediately when there is no body.
+- `url` (without fragment) and `redirected` are defined on the `Response` instance.
+
+Redirects (Fetch HTTP-redirect fetch):
+
+- `follow`, `manual` (returns the 3xx), and `error` (rejects on any redirect status).
+- A 3xx without `Location` is returned as-is. An unparseable or non-HTTP(S) `Location`, or a 21st redirect, is a network error.
+- 301/302 turn `POST` into `GET`; 303 turns anything but `GET`/`HEAD` into `GET`. Both drop the body and the request-body headers.
+- A stream `init.body` is not replayed except on 303. A stream body carried by an input `Request` is not detectable and is replayed from the buffer.
+- A cross-origin hop removes `Authorization` and a user-supplied `Host`, and they stay removed.
+- Fragment inheritance from the request URL is skipped (not observable).
+
+Errors and abort:
+
+- Network and protocol errors reject with `TypeError("fetch failed")`, with the underlying error as `cause`. A body stream errors the same way.
+- `init.signal` rejects with its reason before connecting, while connecting, while waiting for the head, and while reading the body, and closes the socket.
+
+## Not yet implemented
+
+- Decompression (`gzip`, `deflate`).
+- Streaming request bodies with chunked coding.
+- `clone()` preserving `url` and `redirected`.
+- Running the unit tests on workerd.
+
+Known differences from runtime `fetch`: `response.type` is `"default"` (as in workerd), and response headers are mutable.
+
+## Testing
+
+- `deno task test`: unit tests through `createFetcher` with an in-memory fake socket, plus example.com end-to-end tests compared against native `fetch`. Deno's resource sanitizer catches leaked sockets.
+- `deno task test:workerd`: bundles `test/workerd/worker.ts` and runs the example.com checks under local workerd.
+- example.com is behind Cloudflare, which blocks `connect()` from deployed Workers, so it can only be tested on local workerd.
