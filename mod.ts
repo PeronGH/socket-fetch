@@ -18,7 +18,8 @@
  *
  * const fetch = createFetcher({
  *   connect,
- *   connectTls: (address) => connect(address, { secureTransport: "on" }),
+ *   connectTls: (address) =>
+ *     connect(address, { secureTransport: "on", allowHalfOpen: false }),
  * });
  * ```
  *

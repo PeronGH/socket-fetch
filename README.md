@@ -38,7 +38,8 @@ import { createFetcher } from "@pixel/socket-fetch";
 
 const fetch = createFetcher({
   connect,
-  connectTls: (address) => connect(address, { secureTransport: "on", allowHalfOpen: false }),
+  connectTls: (address) =>
+    connect(address, { secureTransport: "on", allowHalfOpen: false }),
 });
 ```
 
