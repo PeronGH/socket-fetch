@@ -175,22 +175,17 @@ function networkError(message: string): TypeError {
 /** Owns one socket for one exchange: aborting, closing, and mapping errors to fetch semantics. */
 class Connection {
   #signal: AbortSignal;
-  #aborted: Promise<never>;
-  #onAbort!: () => void;
+  #onAbort: () => void;
   #socket?: Socket;
   #controller?: ReadableStreamDefaultController<Uint8Array>;
   #closed = false;
 
   constructor(signal: AbortSignal) {
     this.#signal = signal;
-    this.#aborted = new Promise((_, reject) => {
-      this.#onAbort = () => {
-        reject(signal.reason);
-        this.#controller?.error(signal.reason);
-        this.close();
-      };
-    });
-    this.#aborted.catch(() => {});
+    this.#onAbort = () => {
+      this.#controller?.error(signal.reason);
+      this.close();
+    };
     signal.addEventListener("abort", this.#onAbort);
   }
 
@@ -207,8 +202,17 @@ class Connection {
 
   /** Settles with `promise`, or rejects with the abort reason as soon as the signal aborts. */
   run<T>(promise: Promise<T>): Promise<T> {
-    this.#signal.throwIfAborted();
-    return Promise.race([promise, this.#aborted]);
+    const signal = this.#signal;
+    signal.throwIfAborted();
+    // A listener per call rather than a race against one long-lived abort promise, which would
+    // retain every settled call (and its chunk) until the connection ends.
+    return new Promise((resolve, reject) => {
+      const onAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", onAbort);
+      promise.then(resolve, reject).finally(() =>
+        signal.removeEventListener("abort", onAbort)
+      );
+    });
   }
 
   stream(source: BodySource): ReadableStream<Uint8Array> {
