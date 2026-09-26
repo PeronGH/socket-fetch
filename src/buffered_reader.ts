@@ -44,7 +44,9 @@ export class BufferedReader {
         if (this.#buffer.length === 0) return null;
         throw new Error("Connection closed mid-line");
       }
-      this.#buffer = concat(this.#buffer, value);
+      this.#buffer = this.#buffer.length === 0
+        ? value
+        : concat(this.#buffer, value);
     }
   }
 }
