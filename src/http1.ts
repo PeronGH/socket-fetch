@@ -289,10 +289,12 @@ async function skipTrailers(reader: BufferedReader): Promise<void> {
   }
 }
 
-const DECOMPRESSION_FORMATS = new Map<string, CompressionFormat>([
-  ["gzip", "gzip"],
-  ["x-gzip", "gzip"],
-  ["deflate", "deflate"],
+type Decoder = (body: ReadableStream<Uint8Array>) => ReadableStream<Uint8Array>;
+
+const DECODERS = new Map<string, Decoder>([
+  ["gzip", (body) => decompress(body, "gzip")],
+  ["x-gzip", (body) => decompress(body, "gzip")],
+  ["deflate", inflate],
 ]);
 
 /**
@@ -304,20 +306,77 @@ export function decodeContent(
   contentEncoding: string | null,
 ): ReadableStream<Uint8Array> {
   if (contentEncoding === null) return body;
-  const formats = parseList(contentEncoding).map((coding) =>
-    DECOMPRESSION_FORMATS.get(coding.toLowerCase())
+  const decoders = parseList(contentEncoding).map((coding) =>
+    DECODERS.get(coding.toLowerCase())
   );
-  if (formats.some((format) => format === undefined)) return body;
+  if (decoders.some((decoder) => decoder === undefined)) return body;
   let decoded = body;
-  for (const format of (formats as CompressionFormat[]).reverse()) {
-    // Socket chunks are typed ArrayBufferLike-backed, which DecompressionStream's types exclude.
-    const decompression = new DecompressionStream(format) as TransformStream<
-      Uint8Array,
-      Uint8Array
-    >;
-    decoded = decoded.pipeThrough(decompression);
+  for (const decoder of (decoders as Decoder[]).reverse()) {
+    decoded = decoder(decoded);
   }
   return decoded;
+}
+
+function decompress(
+  body: ReadableStream<Uint8Array>,
+  format: CompressionFormat,
+): ReadableStream<Uint8Array> {
+  // Socket chunks are typed ArrayBufferLike-backed, which DecompressionStream's types exclude.
+  const decompression = new DecompressionStream(format) as TransformStream<
+    Uint8Array,
+    Uint8Array
+  >;
+  return body.pipeThrough(decompression);
+}
+
+/**
+ * Decodes the `deflate` coding, which should be zlib-wrapped (RFC 9110 §8.4.1.2) but some servers
+ * send raw, so the format is detected from the zlib header. Node's fetch also accepts both.
+ */
+function inflate(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let output: ReadableStreamDefaultReader<Uint8Array> | undefined;
+
+  const start = async () => {
+    let head = new Uint8Array(0);
+    while (head.length < 2) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const joined = new Uint8Array(head.length + value.length);
+      joined.set(head);
+      joined.set(value, head.length);
+      head = joined;
+    }
+    const rest = new ReadableStream<Uint8Array>({
+      start(controller) {
+        if (head.length > 0) controller.enqueue(head);
+      },
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        if (done) controller.close();
+        else controller.enqueue(value);
+      },
+      cancel: (reason) => reader.cancel(reason),
+    }, { highWaterMark: 0 });
+    return decompress(rest, isZlibHeader(head) ? "deflate" : "deflate-raw")
+      .getReader();
+  };
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      output ??= await start();
+      const { done, value } = await output.read();
+      if (done) controller.close();
+      else controller.enqueue(value);
+    },
+    cancel: (reason) => (output ?? reader).cancel(reason),
+  }, { highWaterMark: 0 });
+}
+
+/** RFC 1950 §2.2: compression method 8 with a window of at most 32 KiB, and a valid check value. */
+function isZlibHeader(bytes: Uint8Array): boolean {
+  return bytes.length >= 2 && (bytes[0] & 0x0f) === 8 && bytes[0] >> 4 <= 7 &&
+    ((bytes[0] << 8) | bytes[1]) % 31 === 0;
 }
 
 /** Splits a comma-separated field value, ignoring empty elements (RFC 9110 §5.6.1). */

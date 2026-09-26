@@ -535,10 +535,11 @@ Deno.test("decodes content codings, last applied first", async (t) => {
     ["gzip", ["gzip"]],
     ["X-Gzip", ["gzip"]],
     ["deflate", ["deflate"]],
+    ["deflate", ["deflate-raw"]],
     ["deflate, gzip", ["deflate", "gzip"]],
   ];
   for (const [contentEncoding, formats] of cases) {
-    await t.step(contentEncoding, async () => {
+    await t.step(`${contentEncoding} (${formats.join(", ")})`, async () => {
       const server = fakeServer(
         encoded(contentEncoding, await compress("hello", formats)),
         { byteByByte: true },
@@ -556,11 +557,15 @@ Deno.test("passes through codings it cannot decode", async () => {
   assertEquals(await (await server.fetch("http://example.com/")).text(), "raw");
 });
 
-Deno.test("errors the body and closes the socket on corrupt content", async () => {
-  const server = fakeServer(encoded("gzip", "not gzip"));
-  const response = await server.fetch("http://example.com/");
-  await assertRejects(() => response.text(), TypeError);
-  assert(server.state.closed);
+Deno.test("errors the body and closes the socket on corrupt content", async (t) => {
+  for (const coding of ["gzip", "deflate"]) {
+    await t.step(coding, async () => {
+      const server = fakeServer(encoded(coding, "not compressed"));
+      const response = await server.fetch("http://example.com/");
+      await assertRejects(() => response.text(), TypeError);
+      assert(server.state.closed);
+    });
+  }
 });
 
 Deno.test("keeps url and redirected on clones", async () => {

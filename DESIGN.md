@@ -59,7 +59,7 @@ Rely on built-ins available in both Deno and workerd instead of reimplementing:
 
 Runtime differences and constraints (verified on Deno 2.9.7 and workerd 2026-08-18):
 
-- workerd's `DecompressionStream` supports only `gzip`, `deflate`, `deflate-raw`. Only advertise and decode `gzip` and `deflate`.
+- workerd's `DecompressionStream` supports only `gzip`, `deflate`, `deflate-raw`. Only advertise `gzip` and `deflate`; `deflate-raw` is used to decode raw `deflate` bodies.
 - `Response` only accepts status 200–599 (Deno also allows 101). Consume 1xx interim responses; treat other out-of-range statuses as a network error.
 - Neither runtime's `Headers` enforces forbidden request headers, so header policy is ours to define.
 - `Response.url` and `Response.redirected` cannot be set via the constructor; define them on the instance with `Object.defineProperty`. The native `clone()` drops them, while native `fetch` responses keep them on clones in all three runtimes, so `clone()` is wrapped.
@@ -85,7 +85,7 @@ Response:
 - Interim 1xx responses are skipped; 101 and statuses outside 100–599 are errors.
 - Body length per RFC 9112 §6.3: none for `HEAD`, 204, and 304; chunked (extensions ignored, trailers discarded); `Content-Length` (identical duplicates accepted); otherwise until close. `Transfer-Encoding` with `Content-Length`, any coding other than a single `chunked`, and `Transfer-Encoding` in HTTP/1.0 are errors.
 - The body is a pull-based stream. The socket closes when the body completes, errors, or is cancelled, or immediately when there is no body.
-- `Content-Encoding` `gzip`, `x-gzip`, and `deflate` are decoded with `DecompressionStream`, last applied first, regardless of what was requested (as all three runtimes do). A body with any other coding is passed through unchanged. Headers are kept as received.
+- `Content-Encoding` `gzip`, `x-gzip`, and `deflate` are decoded with `DecompressionStream`, last applied first, regardless of what was requested (as all three runtimes do). A `deflate` body without a zlib header is decoded as raw deflate (as Node does). A body with any other coding is passed through unchanged. Headers are kept as received.
 - `url` (without fragment), `redirected`, and `headers` are defined on the `Response` instance, and `clone()` is overridden to carry them over. `headers` is a `Headers` subclass whose `set`, `append`, and `delete` throw `TypeError`, matching the immutable headers of fetched responses in all three runtimes.
 
 Redirects (Fetch HTTP-redirect fetch):
